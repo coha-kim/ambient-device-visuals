@@ -1,0 +1,84 @@
+# Jamie Wong: metaballs and marching squares — dense research notes
+
+**Scope and source rule.** Primary source is Jamie Wong, “Metaballs and Marching Squares” (2014): <https://jamie-wong.com/2014/08/19/metaballs-and-marching-squares/>. The article’s runnable implementation is the linked bundle, <https://jamie-wong.com/javascripts/metaball.bundle.js>. Browser/platform recommendations below use only the article plus official documentation for the named APIs and Raspberry Pi 5 hardware: MDN WebGL <https://developer.mozilla.org/en-US/docs/Web/API/WebGL_API>, MDN OffscreenCanvas <https://developer.mozilla.org/en-US/docs/Web/API/OffscreenCanvas>, and Raspberry Pi’s official Pi 5 specification/product page <https://www.raspberrypi.com/products/raspberry-pi-5/>.
+
+## Scalar field and threshold
+
+### Definition
+
+- Start with a circle centered at \((x_0,y_0)\), radius \(r\): \((x-x_0)^2+(y-y_0)^2=r^2\). The article rewrites the “inside or boundary” test as \(r^2/((x-x_0)^2+(y-y_0)^2)\ge1\). [Article, “The Math”](https://jamie-wong.com/2014/08/19/metaballs-and-marching-squares/#the-math)
+- For separate circles, a union-like test can use the maximum contribution, \(\max_i r_i^2/d_i^2\ge1\). Metaballs instead **sum** every ball’s contribution:
+  \[
+  f(x,y)=\sum_{i=0}^{n}\frac{r_i^2}{(x-x_i)^2+(y-y_i)^2}.
+  \]
+  The visible blob is the superlevel set \(f(x,y)\ge1\); its outline is the isocontour \(f(x,y)=1\). [Article](https://jamie-wong.com/2014/08/19/metaballs-and-marching-squares/#the-math)
+- This is a genuine continuous 2D scalar field evaluated at sample coordinates—not a bitmap blur and not merely circles composited with alpha. In the article bundle, `metaball(x,y,circles)` computes `dx`, `dy`, `d2`, then adds `c.r2 / d2` for every circle. [Bundle, module 3](https://jamie-wong.com/javascripts/metaball.bundle.js)
+- The field is inverse-square and additive. Near a ball its value rises sharply; between nearby balls, contributions add. Consequently, two individually sub-threshold regions can become super-threshold in the gap. That is the mathematical source of “blobbiness” and the smooth neck joining balls, not an ad hoc geometric fillet. This is an inference directly from the summed equation and the article’s contrast between max and sum. [Article](https://jamie-wong.com/2014/08/19/metaballs-and-marching-squares/#the-math)
+
+### Thresholding is a separate approximation stage
+
+- Sampling \(f\) on a grid gives continuous numeric corner samples. Thresholding converts each sample to one bit: in the article’s prose, a corner is inside when \(f(x,y)\ge1\), otherwise outside. The bundle’s `threshold(grid,value)` actually uses `grid[i][j] > value`; equality is a negligible edge case but should be specified deliberately in a new implementation. [Article](https://jamie-wong.com/2014/08/19/metaballs-and-marching-squares/#marching-squares); [bundle, module 5](https://jamie-wong.com/javascripts/metaball.bundle.js)
+- A coarse “fill every cell whose center sample exceeds the threshold” rendering is a visual approximation of the superlevel set and looks blocky. It does **not** extract the contour. Increasing grid resolution makes the blocky approximation more amoeba-like but increases field evaluations. [Article](https://jamie-wong.com/2014/08/19/metaballs-and-marching-squares/#the-math)
+- Distinguish three implementations:
+  1. **True field evaluation + marching squares:** evaluate the inverse-square sum at grid corners, then interpolate a contour. This is Wong’s method.
+  2. **True field evaluation + pixel shading:** evaluate the sum for each output pixel (or in a fragment shader). This gives a direct rasterized field, but can be much more expensive on CPU and is a different rendering pipeline.
+  3. **Visual approximation:** draw circles, blur/composite an image, or use a precomputed texture. It may look metaball-like but does not preserve Wong’s scalar field or exact \(f=1\) boundary.
+
+## Marching-squares contour extraction
+
+- Marching squares operates on a 2D scalar field and approximates the line whose samples have one constant value; for this article the target is \(f(x,y)=1\). It samples the **four corners** of each cell rather than deciding from one cell-center sample. [Article, “Marching Squares”](https://jamie-wong.com/2014/08/19/metaballs-and-marching-squares/#marching-squares)
+- Each corner is classified inside/outside. There are \(2^4=16\) configurations. Wong encodes bits in southwest, southeast, northeast, northwest order, producing a cell type from 0 to 15; types 0 and 15 have no crossing, other ordinary types have a segment, and saddle cases 5 and 10 have two segments. [Article](https://jamie-wong.com/2014/08/19/metaballs-and-marching-squares/#marching-squares); [bundle, modules 1–2](https://jamie-wong.com/javascripts/metaball.bundle.js)
+- The lookup table maps each cell type to edge pairs (`N`, `E`, `S`, `W`). The non-interpolated version places each crossing at an edge midpoint, changing square corners into 45° segments. It is cheaper and robust, but visibly faceted at a coarse cell size. [Bundle, `draw45DegContours`](https://jamie-wong.com/javascripts/metaball.bundle.js)
+- Saddle ambiguity: configurations 5 and 10 do not reveal from corner bits alone whether the center is inside or outside. Wong explicitly says the demo assumes the center is always inside “for the sake of simplicity.” For production, choose and document a tie-break rule (center evaluation or an asymptotic-decider-style rule); changing it changes topology in saddles. [Article](https://jamie-wong.com/2014/08/19/metaballs-and-marching-squares/#marching-squares)
+- The algorithm does not mathematically solve the contour between samples. It produces a polygonal, piecewise-linear approximation whose quality depends on cell size, field behavior, and saddle handling. It is an extraction step, not a smoothing filter.
+
+## Edge interpolation and organic deformation
+
+- The 16-way classification retains only one bit per corner. Wong then uses the original scalar values to locate a crossing on each edge. For an edge from value \(f_0\) to \(f_1\), target \(T=1\), the normalized position is
+  \[
+  t=\frac{T-f_0}{f_1-f_0},
+  \]
+  clamped/guarded in a production implementation; position is \(p_0+t(p_1-p_0)\). The article derives the equivalent y-coordinate formula for a vertical edge:
+  \(Q_y=B_y+(D_y-B_y)(1-f(B))/(f(D)-f(B))\). [Article, “Linear Interpolation”](https://jamie-wong.com/2014/08/19/metaballs-and-marching-squares/#linear-interpolation)
+- Wong is explicit that \(f\) is not linear, but says linear interpolation is “good enough” for visually meaningful smooth contour lines. Thus “smooth” means sub-cell placement of straight segments, not an exact root solve or a mathematically smooth spline. [Article](https://jamie-wong.com/2014/08/19/metaballs-and-marching-squares/#linear-interpolation)
+- In the bundle, `drawSmoothContours` reads NW/NE/SW/SE numeric field values, computes N/E/S/W edge offsets using `lerp(..., threshold)`, then connects the lookup-table edge pairs. If an edge does not cross, it uses 0.5 as a placeholder; a production rewrite should avoid relying on a placeholder on non-crossing edges. [Bundle, `drawSmoothContours`](https://jamie-wong.com/javascripts/metaball.bundle.js)
+- Organic deformation follows from two levels of continuity:
+  - **Field level:** additive inverse-square influence makes nearby balls raise \(f\) in the neck, so the \(f=1\) contour bulges outward and merges rather than remaining as independent circles.
+  - **Sampling level:** as balls move, corner values change continuously (except for degenerate numerical cases), moving each interpolated crossing continuously within its cell. The contour therefore stretches, pinches, and reforms with the moving balls. At a topology change, a cell type can flip and the connectivity can change; the result is organic but piecewise-linear and resolution-dependent.
+- The article’s visual progression is important: center-cell thresholding is blocky; midpoint marching squares is better but “all we’ve really done is turned our 90 degree angles into 45 degree angles”; retaining values and interpolating produces the “pretty” smooth result. [Article](https://jamie-wong.com/2014/08/19/metaballs-and-marching-squares/#marching-squares); [Article](https://jamie-wong.com/2014/08/19/metaballs-and-marching-squares/#linear-interpolation)
+
+## Computational costs and scaling
+
+- Wong estimates that 40 bouncing circles on a 700×500 grid means about **14 million operations** for per-pixel-style field work; at 60 fps that is about **840 million operations/second**, which he says ordinary JavaScript engines could not sustain at the time. [Article](https://jamie-wong.com/2014/08/19/metaballs-and-marching-squares/#the-math)
+- The relevant asymptotic cost is \(O(SN)\) per field refresh, where \(S\) is number of grid samples and \(N\) is number of balls. Marching-squares classification/interpolation/drawing is \(O(C)\), where \(C\) is number of cells, roughly \(S\), and usually lower-order than field evaluation. Memory is \(O(S)\) for numeric samples plus boolean/cell-type arrays. This is an inference from the bundle’s nested sample-grid loop and per-sample loop over circles. [Bundle, modules 3–5](https://jamie-wong.com/javascripts/metaball.bundle.js)
+- Cell size is the main quality/performance knob: halving cell size in both dimensions makes roughly 4× as many samples/cells; doubling balls makes roughly 2× field arithmetic. A practical budget should measure the actual target browser/device rather than transplanting the 2014 estimate.
+- The article’s code recalculates samples on every animation tick, then classifies and draws. Its `sample` helper loops rows and columns; `Simulation.recalculate` calls the scalar function for every grid corner, thresholds, and classifies. [Bundle](https://jamie-wong.com/javascripts/metaball.bundle.js)
+- The demo avoids needless work in two useful ways: it uses `requestAnimationFrame`, and `animateOnScroll` recalculates/draws only when a canvas intersects the viewport. It also supports pausing by click. [Article’s embedded code](https://jamie-wong.com/2014/08/19/metaballs-and-marching-squares/)
+- Practical optimizations consistent with this design: cache \(r_i^2\) (Wong does), use typed arrays and flat grids, avoid per-sample allocations, compute only a padded region around active balls when the scene permits, lower simulation resolution and render at device scale, and skip updates when balls/scene are static. These are engineering recommendations, not claims made by the article.
+
+## Browser and WebGL implications
+
+### Current practical browser implementation
+
+- The article itself is a Canvas 2D implementation: it obtains `canvas.getContext('2d')`, draws segments with `beginPath/moveTo/lineTo/stroke`, and drives updates with `requestAnimationFrame`. It is therefore a useful baseline for a simple, inspectable CPU implementation, not a WebGL implementation. [Bundle](https://jamie-wong.com/javascripts/metaball.bundle.js); [article demo code](https://jamie-wong.com/2014/08/19/metaballs-and-marching-squares/)
+- For a modest number of balls and a coarse-to-medium grid, Canvas 2D plus a typed-array field buffer is the lowest-complexity option. Build the field once per frame, classify cells, interpolate edge points, and stroke or fill the resulting segments. Keep simulation updates in `requestAnimationFrame`; use visibility/IntersectionObserver-style gating analogous to Wong’s scroll check.
+- For higher resolution, many balls, multiple instances, or a full-screen effect, WebGL is the practical browser path. MDN describes WebGL as a browser API for hardware-accelerated 2D/3D graphics using the GPU: <https://developer.mozilla.org/en-US/docs/Web/API/WebGL_API>. Two valid designs must not be conflated:
+  - **True 2D field in a fragment shader:** each fragment evaluates \(\sum_i r_i^2/d_i^2\), then thresholds/smoothsteps at \(T\). This is a true field evaluation but does not use marching squares; output is a rasterized isocontour.
+  - **GPU marching squares:** evaluate field values at grid vertices (for example in a texture), classify/interpolate cells, then render segments/triangles. This preserves the article’s extraction concept but needs more plumbing and careful handling of ambiguous cases.
+- A common visual approximation is to render each ball as a radial sprite/texture and additively blend or blur it. That can be fast and attractive, but it is only equivalent to the article’s field if the radial kernel, normalization, threshold, precision, and compositing reproduce the same sum. Label it an approximation rather than “marching squares.”
+- WebGL portability is a runtime concern: test context creation, shader precision, device-pixel ratio, and mobile/embedded browser behavior; provide a Canvas 2D fallback. The article gives no WebGL benchmark, so do not claim a particular FPS from it.
+- CPU evaluation can be moved off the main thread with `OffscreenCanvas` where supported; MDN documents it as a canvas that can be rendered offscreen and used in workers: <https://developer.mozilla.org/en-US/docs/Web/API/OffscreenCanvas>. This helps input/layout responsiveness but does not reduce the \(O(SN)\) arithmetic unless the worker uses a different parallel implementation. Feature-detect and retain a main-thread fallback.
+
+## Raspberry Pi 5 recommendations
+
+- Raspberry Pi’s official specification lists a 2.4 GHz quad-core 64-bit Arm Cortex-A76 CPU, VideoCore VII GPU with OpenGL ES 3.1 and Vulkan 1.3, dual 4Kp60 HDMI output, and RAM options from 1 GB through 16 GB. [Official Pi 5 specification](https://www.raspberrypi.com/products/raspberry-pi-5/)
+- **Recommended baseline for a kiosk/ambient visual:** Pi 5 4 GB or 8 GB, current Raspberry Pi OS (the product page says Bookworm and current Trixie work; versions older than Bookworm do not), Chromium/Firefox with WebGL enabled, and a 720p or 1080p canvas. RAM above 4 GB is unlikely to improve a small field’s arithmetic; choose 8 GB only if the page also runs other services/assets. [Official product page](https://www.raspberrypi.com/products/raspberry-pi-5/)
+- **Prefer GPU for full-screen/high-resolution visuals:** use WebGL 2 where feature-detected, with a fragment-shader field or GPU pipeline; the Pi 5’s official OpenGL ES 3.1/Vulkan 1.3 capability makes GPU-backed rendering a reasonable target, but browser driver support and shader limits must be tested on the exact OS/browser image. Retain a Canvas 2D fallback.
+- **CPU/Canvas 2D starting point:** use 16–32 px grid cells for a 1280×720 logical canvas, begin around 10–20 balls, and measure. If the contour is too faceted, reduce cell size only until frame time is too high; avoid jumping directly to per-pixel CPU evaluation. These starting values are recommendations derived from the article’s \(O(SN)\) cost, not Pi-certified benchmarks.
+- **Thermals and power are part of sustained performance:** Raspberry Pi says Pi 5 performs best with active cooling and recommends a high-quality 5 V/5 A USB-C supply; it specifically lists the Pi 5 case with integrated fan and an Active Cooler. Use one of those for an always-on animation, plus the recommended 27 W supply, rather than assuming a Pi 4 supply is sufficient. [Official product page](https://www.raspberrypi.com/products/raspberry-pi-5/)
+- **Frame-budget policy:** target a stable 30 fps before attempting 60 fps; pause or reduce updates when the display is hidden, and dynamically lower grid resolution when measured frame time exceeds the budget. This follows Wong’s visibility gating and the article’s warning about the cost of dense sampling. [Article](https://jamie-wong.com/2014/08/19/metaballs-and-marching-squares/)
+- **Validate the real deployment:** benchmark the chosen browser, resolution, ball count, cell size, WebGL path, and thermal state on the Pi 5. The official product specification establishes available hardware/API capabilities, not a guaranteed browser frame rate for this algorithm.
+
+## Bottom line
+
+Wong’s key idea is compact: define a continuous additive inverse-square field, choose the \(f=1\) isocontour, sample its corners, classify each cell among 16 cases, and use the retained scalar values for linear edge interpolation. Additive influence creates the smooth necks; interpolation makes motion look organic at sub-cell resolution. The cost remains dominated by evaluating every grid sample against every ball, so browser implementations should tune cell size and ball count, gate inactive work, and move full-screen/high-density evaluation to WebGL when measurements justify it. On Pi 5, use active cooling and adequate USB-C power for sustained load, prefer a tested WebGL path for dense visuals, and keep a Canvas 2D/low-resolution fallback.
