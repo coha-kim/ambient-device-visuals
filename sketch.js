@@ -32,8 +32,8 @@
 // discs fuse into a single shape with a genuine neck and a crisp iso-surface
 // edge -- no soft halo bleeding into the background. A lone orb thresholds
 // straight back to a clean hard-edged disc with a smooth gradient inside it.
-// Where two different-population discs overlap in the neck, the blur mixes
-// their gradients, so the bridge is a smooth blend, not an alpha overlay.
+// Where different populations overlap, their field contributions blend. A
+// restrained edge tint keeps each blob's coloured ring visible in the merge.
 // The field disc size is FIXED (FIELD_REACH) -- a lone orb is always the same
 // size whatever its attractionStrength; fusion is gated by the physics letting
 // orbs get close, not by inflating the discs.
@@ -59,24 +59,26 @@ const OUTER_RATIO = 1.00;
 const CENTER_LIGHTEN = 0.66;
 
 // ---- autonomous wander (fixed) ----
-const MOVE_BASE_PX = 1.5;    // px/frame at speed 1
+const MOVE_BASE_PX = 0.9;    // px/frame at speed 1; speed envelope adds variation
 const NOISE_BASE   = 0.005;  // wander-time advance per frame at speed 1
+const WANDER_SPEED_MIN = 0.35;
+const WANDER_SPEED_MAX = 1.10;
+const WANDER_SPEED_OFFSET = 8441;
 // vx = noise(seed+off0) - noise(seed+off1), vy likewise with off2/off3. Four
 // far-apart offsets so the channels are mutually decorrelated; a difference of
 // two noise samples is zero-mean whatever noise()'s own mean is (see wander()).
 const WANDER_NOISE_OFFSETS = [0, 2113, 4229, 6337];
 const EDGE_MARGIN  = 110;
 const EDGE_STEER   = 2.6;
-const ROAM_FORCE = 0.035;
-const ROAM_RADIUS_X = 0.34;
-const ROAM_RADIUS_Y = 0.30;
 
 // ---- attraction forces ----
 // Inter-population strength is exposed to the portable device. Intra-population
 // strength is fixed here so portable input cannot change within-group cohesion.
 const BASE_INTER_ATTRACTION = 0.8;
 const COLLISION_REACH_FACTOR = 1.05;
-const INTER_ATTRACTION_SCALE_BY_POP = Object.freeze([0.0, 1.0, 1.0]);
+const INTER_ATTRACTION_SCALE_BY_POP = Object.freeze([1.0, 1.0, 1.0]);
+const ZERO_ATTRACTION_SEPARATION = 1.02;
+const WALL_MIRROR_FACTOR = 0.65;
 // Radii scale with overallSize so the behaviour looks the same at any orb size.
 //
 // attractionStrength sweeps a population's cross-population contact from a clean
@@ -114,8 +116,10 @@ const MERGE_BUFFER_SCALE = 1.0; // calculate the field at the display's native 1
 // orbs FUSE is decided by the summed field and their physics.
 const FIELD_REACH = 1.10;
 const ATTR_MAX = 4;              // attraction slider max; the per-population sliders use this directly
-const DISPLAY_SIZE_SCALE = 2.36; // twice the current display blob size
+const DISPLAY_SIZE_SCALE = 1.40; // modest increase from the half-size tuning
 const RADIUS_VARIATION_PX = 20;
+const MASTER_RADIUS_BONUS_MIN = 5;
+const MASTER_RADIUS_BONUS_MAX = 10;
 const FIELD_ISO = 0.20;
 const FIELD_EDGE = 0.10;
 const FIELD_RENDER_INTERVAL = 2; // update the expensive full-resolution field at 30Hz
@@ -158,7 +162,6 @@ let fieldOrbs = [];
 let WHITE;
 
 let noiseAccumByPop = Array(POP_COUNT).fill(0);  // advanced by each pop's speed -> wander time
-let roamPhaseByPop = Array.from({ length: POP_COUNT }, (_, p) => p * Math.PI * 2 / POP_COUNT);
 let sliderRefs = {};
 let fpsSpan = null;
 
@@ -208,7 +211,8 @@ function initOrbs() {
       orbs.push(new Orb(
         constrain(gx + random(-70, 70), 60, width - 60),
         constrain(gy + random(-70, 70), 60, height - 60),
-        p));
+        p,
+        i === 0));
     }
   }
 }
@@ -239,20 +243,21 @@ function setParam(key, value, assign) {
 
 function draw() {
   window.harveyAmbientV1?.update();
-  background(7, 7, 11);
+  background('#2F302F');
 
   for (let p = 0; p < POP_COUNT; p++) {
     noiseAccumByPop[p] += NOISE_BASE * speedByPop[p];
-    roamPhaseByPop[p] += NOISE_BASE * speedByPop[p] * 0.35;
   }
 
   // --- AUTONOMOUS: each orb on its own seed, on its population's clock ---
   for (const o of orbs) o.wander(noiseAccumByPop[o.pop]);
 
-  // --- INTER-POPULATION: attraction / soft repulsion shell + merge proximity ---
+  // --- INTER-POPULATION: local collision attraction and merge proximity ---
   for (const o of orbs) o.applyCrossPopulationForces(orbs);
 
   for (const o of orbs) o.update();
+
+  resolveZeroAttractionSeparation(orbs);
 
   // --- RENDER: every orb through the single-pass metaball pipeline ---
   if (frameCount % FIELD_RENDER_INTERVAL === 0) {
@@ -261,6 +266,33 @@ function draw() {
     image(levelBuffer, 0, 0, width, height);
   }
 
+}
+
+function resolveZeroAttractionSeparation(all) {
+  for (let i = 0; i < all.length; i++) {
+    for (let j = i + 1; j < all.length; j++) {
+      const a = all[i], b = all[j];
+      if (a.pop === b.pop) continue;
+      const pairAttraction = Math.min(
+        effectiveInterAttractionFor(a.pop),
+        effectiveInterAttractionFor(b.pop)
+      );
+      if (pairAttraction > 0) continue;
+
+      let dx = b.pos.x - a.pos.x;
+      let dy = b.pos.y - a.pos.y;
+      let d = Math.hypot(dx, dy);
+      const minDistance = (a.visualRadius() + b.visualRadius()) * ZERO_ATTRACTION_SEPARATION;
+      if (d >= minDistance) continue;
+      if (d < 1e-4) { dx = 1; dy = 0; d = 1e-4; }
+      const push = (minDistance - d) / 2;
+      const ux = dx / d, uy = dy / d;
+      a.pos.x -= ux * push;
+      a.pos.y -= uy * push;
+      b.pos.x += ux * push;
+      b.pos.y += uy * push;
+    }
+  }
 }
 
 // Evaluate one shared metaball field. The contour is the isosurface of the
@@ -296,19 +328,59 @@ function renderOrbLayers() {
     for (let x = 0; x < w; x++) {
       let field = 0;
       let redSum = 0, greenSum = 0, blueSum = 0;
+      let ringRedSum = 0, ringGreenSum = 0, ringBlueSum = 0;
+      let ringWeight = 0;
 
       for (const o of fieldOrbs) {
         if (x < o.minX || x > o.maxX || y < o.minY || y > o.maxY) continue;
-        const dx = x + 0.5 - o.x;
-        const dy = y + 0.5 - o.y;
-        const normalizedDistanceSquared = (dx * dx + dy * dy) / o.radiusSquared;
-        if (normalizedDistanceSquared >= 1) continue;
+        const px = x + 0.5;
+        const py = y + 0.5;
+        let dx = px - o.x;
+        let dy = py - o.y;
+        let normalizedDistanceSquared = (dx * dx + dy * dy) / o.radiusSquared;
+        let influence = normalizedDistanceSquared < 1
+          ? (1 - normalizedDistanceSquared) ** 2
+          : 0;
 
-        const influence = (1 - normalizedDistanceSquared) ** 2;
+        if (o.x < o.radiusInField * 1.2 || o.x > w - o.radiusInField * 1.2) {
+          const mirrorX = o.x < w / 2 ? -o.x : 2 * w - o.x;
+          dx = px - mirrorX;
+          normalizedDistanceSquared = (dx * dx + dy * dy) / o.radiusSquared;
+          if (normalizedDistanceSquared < 1) {
+            const mirrorInfluence = WALL_MIRROR_FACTOR * (1 - normalizedDistanceSquared) ** 2;
+            influence += mirrorInfluence;
+            redSum += o.red * mirrorInfluence;
+            greenSum += o.green * mirrorInfluence;
+            blueSum += o.blue * mirrorInfluence;
+          }
+        }
+        if (o.y < o.radiusInField * 1.2 || o.y > h - o.radiusInField * 1.2) {
+          const mirrorY = o.y < h / 2 ? -o.y : 2 * h - o.y;
+          dx = px - o.x;
+          dy = py - mirrorY;
+          normalizedDistanceSquared = (dx * dx + dy * dy) / o.radiusSquared;
+          if (normalizedDistanceSquared < 1) {
+            const mirrorInfluence = WALL_MIRROR_FACTOR * (1 - normalizedDistanceSquared) ** 2;
+            influence += mirrorInfluence;
+            redSum += o.red * mirrorInfluence;
+            greenSum += o.green * mirrorInfluence;
+            blueSum += o.blue * mirrorInfluence;
+          }
+        }
+        if (influence <= 0) continue;
         field += influence;
         redSum += o.red * influence;
         greenSum += o.green * influence;
         blueSum += o.blue * influence;
+        const ringInfluence = influence * constrain(
+          (normalizedDistanceSquared - 0.42) / 0.58,
+          0,
+          1
+        );
+        ringRedSum += o.red * ringInfluence;
+        ringGreenSum += o.green * ringInfluence;
+        ringBlueSum += o.blue * ringInfluence;
+        ringWeight += ringInfluence;
       }
 
       const index = (y * w + x) * 4;
@@ -321,9 +393,18 @@ function renderOrbLayers() {
       if (alpha <= 0) continue;
       const inv = 1 / field;
       const centerLight = constrain((field - FIELD_ISO) * 0.55, 0, CENTER_LIGHTEN);
-      pixels[index] = lerp(redSum * inv, 255, centerLight);
-      pixels[index + 1] = lerp(greenSum * inv, 255, centerLight);
-      pixels[index + 2] = lerp(blueSum * inv, 255, centerLight);
+      let blendedRed = redSum * inv;
+      let blendedGreen = greenSum * inv;
+      let blendedBlue = blueSum * inv;
+      if (ringWeight > 0) {
+        const ringMix = constrain((ringWeight * inv) * 0.18, 0, 0.18);
+        blendedRed = lerp(blendedRed, ringRedSum / ringWeight, ringMix);
+        blendedGreen = lerp(blendedGreen, ringGreenSum / ringWeight, ringMix);
+        blendedBlue = lerp(blendedBlue, ringBlueSum / ringWeight, ringMix);
+      }
+      pixels[index] = lerp(blendedRed, 255, centerLight);
+      pixels[index + 1] = lerp(blendedGreen, 255, centerLight);
+      pixels[index + 2] = lerp(blendedBlue, 255, centerLight);
       pixels[index + 3] = alpha * 255;
     }
   }
@@ -370,13 +451,16 @@ function resolveCrossPopulationSeparation(all) {
 }
 
 class Orb {
-  constructor(x, y, pop) {
+  constructor(x, y, pop, isMaster) {
     this.pos = createVector(x, y);
     this.pop = pop;
+    this.isMaster = isMaster;
     this.autoVel = createVector(0, 0);
     this.collisionForce = createVector(0, 0);
     this.mergeAmount = 0;
-    this.radiusOffset = random(-RADIUS_VARIATION_PX, RADIUS_VARIATION_PX);
+    this.radiusOffset = isMaster
+      ? random(MASTER_RADIUS_BONUS_MIN, MASTER_RADIUS_BONUS_MAX)
+      : random(-RADIUS_VARIATION_PX, 0);
     // per-individual seed so wander paths never fall into sync across a population.
     this.noiseSeed = random(1000);
   }
@@ -408,18 +492,15 @@ class Orb {
     if (this.pos.y > height - m) vy -= EDGE_STEER * (1 - (height - this.pos.y) / m);
 
     this.autoVel.set(vx, vy);
-    if (this.autoVel.magSq() > 1e-6) this.autoVel.setMag(MOVE_BASE_PX * speedByPop[this.pop]);
+    if (this.autoVel.magSq() > 1e-6) {
+      const speedNoise = noise(this.noiseSeed + WANDER_SPEED_OFFSET, nz * 0.72 + 19);
+      const speedScale = lerp(WANDER_SPEED_MIN, WANDER_SPEED_MAX, speedNoise);
+      this.autoVel.setMag(MOVE_BASE_PX * speedByPop[this.pop] * speedScale);
+    }
 
-    const phase = roamPhaseByPop[this.pop];
-    const targetX = width * 0.5 + Math.cos(phase) * width * ROAM_RADIUS_X;
-    const targetY = height * 0.5 + Math.sin(phase * 0.83) * height * ROAM_RADIUS_Y;
-    this.autoVel.x += (targetX - this.pos.x) * ROAM_FORCE / width;
-    this.autoVel.y += (targetY - this.pos.y) * ROAM_FORCE / height;
   }
 
-  // INTER-POPULATION -- attraction toward, and a repulsion shell around,
-  // DIFFERENT-population orbs, plus this orb's merge proximity (0..1) for the
-  // render. Same-population orbs are skipped entirely.
+  // INTER-POPULATION -- local collision attraction between different colours.
   //
   // Only different-population boids interact, and only while their field
   // radii overlap. Their shared field creates the metaball collision shape;
@@ -437,17 +518,27 @@ class Orb {
       const dx = other.pos.x - this.pos.x;
       const dy = other.pos.y - this.pos.y;
       const d = Math.hypot(dx, dy);
-      const collisionReach = (ownRadius + other.visualRadius()) * COLLISION_REACH_FACTOR;
+      const otherAttraction = effectiveInterAttractionFor(other.pop);
+      const pairAttraction = Math.min(attr, otherAttraction);
+      const attractionT = constrain(pairAttraction / ATTR_MAX, 0, 1);
+      const collisionReach = (ownRadius + other.visualRadius()) *
+        lerp(ZERO_ATTRACTION_SEPARATION, COLLISION_REACH_FACTOR, attractionT);
       if (d >= collisionReach) continue;
 
       const ux = d > 1e-4 ? dx / d : 1;
       const uy = d > 1e-4 ? dy / d : 0;
       const contact = constrain(1 - d / collisionReach, 0, 1);
-      const attract = attr * ATTRACT_BASE * contact;
-      this.collisionForce.x += ux * attract;
-      this.collisionForce.y += uy * attract;
+      if (pairAttraction > 0) {
+        const attract = attr * ATTRACT_BASE * contact;
+        this.collisionForce.x += ux * attract;
+        this.collisionForce.y += uy * attract;
+      } else {
+        const push = REPULSION_BOUNCE * contact;
+        this.collisionForce.x -= ux * push;
+        this.collisionForce.y -= uy * push;
+      }
 
-      const m = mergeT * contact;
+      const m = pairAttraction > 0 ? mergeT * contact : 0;
       if (m > this.mergeAmount) this.mergeAmount = m;
     }
   }

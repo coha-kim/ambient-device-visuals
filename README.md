@@ -2,7 +2,7 @@
 
 Standalone p5.js visuals extracted from the original `capstone-poc/orbmerge` sketch.
 
-Three populations of two to four smooth gradient metaball boids move freely and are differentiated by colour. Each population gets a stable randomized count of 2–4 boids at initialization, and each boid has a randomized radius within ±20 px. Boids have no same-population cohesion and no long-range population attraction; different populations respond only when their field radii overlap, where the shared scalar field creates the metaball collision shape. Inter-population attraction defaults to 0.8 and is the only attraction controlled by portable-device input. The darkest population (#33C4A0) uses zero inter-population attraction, while the other populations use 1.0. Autonomous movement uses a moderate 1.5 px/frame base speed. Fixed population colours: `#33C4A0`, `#C6E2B6`, `#DCEBD3`, with lighter centres.
+Three populations of two to four smooth gradient metaball boids move freely and are differentiated by colour. Each population has one master blob, randomly 5–10 px larger than its children; children retain randomized sizes up to 20 px below the base size. Blob display size uses a moderate 1.4 scale tuning. Boids use independent zero-mean Perlin wandering with edge steering only; there is no gravity, population roaming target, or attraction during free movement. Their movement speed varies smoothly between slow and faster phases with a nonzero minimum, so they never become static. Boids interact across populations only within an attraction-dependent collision radius; contact immediately produces a shared metaball merge. Merged fields blend population colours naturally, with a subtle colour-tinted ring around each blob so merged populations remain readable without hard boundaries. All populations now start with the same baseline inter-population attraction, while portable-device values can adjust each population from that baseline. Portable-device attraction values control only these inter-population collision radii and responses. Near canvas walls, reflected field influence slightly deforms blobs instead of leaving a perfect clipped circle. The canvas background is `#2F302F` with a white page margin for visibility. Autonomous movement uses a 0.9 px/frame base speed with a smooth speed envelope. Fixed population colours: `#33C4A0`, `#C6E2B6`, `#DCEBD3`, with lighter centres.
 
 ## Run
 
@@ -20,7 +20,7 @@ See [CONTEXT.md](CONTEXT.md) for project history and scope.
 
 ## WebSocket v1
 
-From the sibling `portable-device-visuals` repository, run `npm install` then `npm run bridge`. Open http://127.0.0.1:8787/ and use the two pairing links. `ambient-link-v1.mjs` maps the portable's intensity to reduced attraction for its second population, then restores baseline over 5× its full button-hold duration. Size and drift speed stay independent. Other populations retain their baseline.
+From the sibling `portable-device-visuals` repository, run `npm install` then `npm run bridge`. Open http://127.0.0.1:8787/ and use the two pairing links. `ambient-link-v1.mjs` maps each portable population's intensity from the shared `0.8` baseline, then restores baseline over 5× its full button-hold duration. Size and drift speed stay independent.
 
 Existing local edits hiding the controls were preserved. Pre-connection entry files are under `versions/pre-websocket-v1/`. See the portable project's `connection-v1/README-v1.md` for secure phone access and tuning. Physical phone/display feel remains unverified.
 
