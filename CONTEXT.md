@@ -31,3 +31,27 @@ index.html loads pinned p5.js 2.3.1 from jsDelivr and sketch.js. README.md gives
 ## Working preferences
 
 Keep this project independent. Ask for clarification when scope is unclear. Avoid repeating prior explanations, and maintain this context file when project scope or behaviour changes.
+
+## WebSocket v1 — 2026-10-19 (supersedes network status above)
+
+The existing local edits hiding controls are preserved. `ambient-link-v1.mjs` uses `harvey-link-v1.mjs` to receive room snapshots and calls `updateParamsFromSensor` before physics in `draw()`. Only attraction changes: `1.3 * (1 - intensity)` on the selected population (default 1, #2A9284). Stronger shake creates greater separation from other populations. Full button-hold duration sets recovery at 10× hold time, using the relay's clock and the same recovery curve as portable. Size, speed, rendering and autonomous wander are unchanged. Relay and phone HTTPS/WSS instructions live in the sibling portable repo's `connection-v1/README-v1.md`. Original entry files including local unsaved edits are saved in `versions/pre-websocket-v1/`. No GitHub Pages deployment or physical-phone validation is implied.
+
+## Yellow visibility v2 — 2026-10-19
+
+For testing, the portable-controlled population (index 1) is yellow #FFD84D on the ambient display. Only its display colour and the sketch cache version changed. The other populations, gradient lightening, physics and interaction mapping are unchanged. Pre-change files are saved in `versions/pre-yellow-v2/`. Pressing without shaking does not reduce attraction; held shaking accumulates intensity. At intensity >= approximately 0.5385, attraction reaches the <=0.6 bounce-only setting.
+
+## Recovery tuning v4 — 2026-10-19
+
+Current recovery multiplier is 5: a hold lasting N seconds returns both visuals to baseline over 5N seconds after release. This supersedes earlier 10× values. Hold-only input, intensity build-up, yellow population and the recovery curve are unchanged. Backups are in `versions/pre-recovery-v4/`.
+
+## Recovery range v5 — 2026-10-19
+
+Current recovery is 5× the full hold duration, clamped to 30–120 seconds for any positive hold. A zero-duration no-op has zero recovery. Examples: 3s → 30s; 10s → 50s; 24s or longer → 120s. This supersedes the unbounded v4 timing. Both copies of `harvey-link-v1.mjs` use `recoverySecondsFor`. The hold-only input and decay curve are unchanged. Backups are in `versions/pre-recovery-v5/`.
+
+## Reference palette v6 — 2026-10-20
+
+Sampled the centres of the supplied palette image: #009A8A, #3CBDAF, #77EDD7, #E1EBD7, #CAE7AD, left to right. There are three ambient populations, so their base colours use the first three in that order. The portable renderer matches its default owner, population index 1, with #3CBDAF. Both retain lightened centres. The temporary yellow is replaced by this palette. Recovery, interaction, population counts and background colours are unchanged. Pre-change files are saved in `versions/pre-palette-v6/`.
+
+## Larger blobs v7 — 2026-10-20
+
+Blob radius increased by 25% in both visuals. Ambient overallSize is 65 (previously 52). Portable uses 0.10625 of the shorter viewport dimension, clamped to 27.5–65 px (previously 0.085, clamped to 22–52 px). Palette v6 and the 30–120 second recovery remain. Pre-change files are saved in `versions/pre-size-v7/`.

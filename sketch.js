@@ -1,15 +1,15 @@
 // ambient-device-visuals -- smooth gradient orbs for multiple populations, with a
 // temporary, fully-reversible metaball MERGE where individuals from DIFFERENT
-// populations meet.
+// populations meet. Intra-population attraction is independent and is never
+// changed by portable-device input.
 //
 // Two logic domains are kept deliberately separate -- this boundary is what
 // later sensor mapping depends on:
 //
 //   AUTONOMOUS (fixed, never sensor-exposed) -- Orb.wander()
 //     Each orb wanders on its OWN Perlin-noise walk (seeded per orb). Nothing
-//     an orb does here depends on any other orb -- there is no intra-population
-//     flocking or alignment. Movement SPEED is per population (see speedByPop);
-//     the noise walk itself is fixed.
+//     an orb does here depends on any other orb. Movement SPEED is per population
+//     (see speedByPop); the noise walk itself is fixed.
 //
 //   INTER-POPULATION (sensor-exposed: per-population attractionStrength; also
 //   overallSize / per-population speed) -- Orb.applyCrossPopulationForces()
@@ -45,8 +45,9 @@
 const CANVAS_W = 1024;
 const CANVAS_H = 600;
 const POP_COUNT = 3;
-const INDIVIDUALS_PER_POP = 5;
-const POP_COLORS = Object.freeze(['#1D665C', '#2A9284', '#6AB3A9']); // dark, base, light teal
+const MIN_INDIVIDUALS_PER_POP = 2;
+const MAX_INDIVIDUALS_PER_POP = 4;
+const POP_COLORS = Object.freeze(['#33C4A0', '#C6E2B6', '#DCEBD3']);
 
 // ---- orb shape ----
 // Each orb is one disc at this radius (as a fraction of overallSize), filled
@@ -58,16 +59,24 @@ const OUTER_RATIO = 1.00;
 const CENTER_LIGHTEN = 0.66;
 
 // ---- autonomous wander (fixed) ----
-const MOVE_BASE_PX = 2.0;    // px/frame at speed 1
-const NOISE_BASE   = 0.006;  // wander-time advance per frame at speed 1
+const MOVE_BASE_PX = 1.5;    // px/frame at speed 1
+const NOISE_BASE   = 0.005;  // wander-time advance per frame at speed 1
 // vx = noise(seed+off0) - noise(seed+off1), vy likewise with off2/off3. Four
 // far-apart offsets so the channels are mutually decorrelated; a difference of
 // two noise samples is zero-mean whatever noise()'s own mean is (see wander()).
 const WANDER_NOISE_OFFSETS = [0, 2113, 4229, 6337];
 const EDGE_MARGIN  = 110;
 const EDGE_STEER   = 2.6;
+const ROAM_FORCE = 0.035;
+const ROAM_RADIUS_X = 0.34;
+const ROAM_RADIUS_Y = 0.30;
 
-// ---- inter-population forces (attractionStrengthByPop is the exposed param) ----
+// ---- attraction forces ----
+// Inter-population strength is exposed to the portable device. Intra-population
+// strength is fixed here so portable input cannot change within-group cohesion.
+const BASE_INTER_ATTRACTION = 0.8;
+const COLLISION_REACH_FACTOR = 1.05;
+const INTER_ATTRACTION_SCALE_BY_POP = Object.freeze([0.0, 1.0, 1.0]);
 // Radii scale with overallSize so the behaviour looks the same at any orb size.
 //
 // attractionStrength sweeps a population's cross-population contact from a clean
@@ -79,9 +88,10 @@ const EDGE_STEER   = 2.6;
 // mergeT in [0,1] is how far along that sweep this population sits (0 below
 // MERGE_THRESHOLD, 1 at ATTR_MAX); it lerps both the shell radius and its gain.
 const MERGE_THRESHOLD    = 0.6;   // attractionStrength at/below this = pure bounce, no merge
+const MERGE_RESPONSE     = 0.68;  // <1 makes mid-range portable changes more visible
 const INTERACTION_FACTOR = 2.6;   // attraction reaches this * overallSize
 const MERGE_FULL_FACTOR  = 1.4;   // mergeAmount reaches 1 at this * overallSize (deep overlap)
-const ATTRACT_BASE   = 0.09;      // px/frame per unit attractionStrength, at contact
+const ATTRACT_BASE   = 0.18;      // px/frame per unit attractionStrength, at contact
 const REPEL_DIST_BOUNCE = 2.8;    // soft-shell onset at mergeT 0 (* overallSize) -- beyond fusion range
 const REPEL_DIST_MERGE  = 1.3;    // soft-shell onset at mergeT 1 (* overallSize) -- anti-collapse core only
 const REPULSION_BOUNCE  = 3.0;    // px/frame max soft repel at mergeT 0 -- cushions the approach
@@ -98,151 +108,103 @@ const SEPARATION_ITERS   = 2;     // relaxation passes per frame (keeps 3-popula
 // The goo filter runs at BUFFER resolution (cheap), then the thresholded layer
 // is scaled up to the canvas with a plain bilinear blit -- that upscale also
 // lends the hard iso-surface a slightly organic softness for free.
-const MERGE_BUFFER_SCALE = 0.5;  // offscreen buffer res vs canvas (lower = cheaper; try 0.4 on a Pi)
-const GOO_BLUR        = 5;        // SVG feGaussianBlur stdDeviation, in buffer px -- the field softness
-const GOO_ALPHA_GAIN  = 16;      // feColorMatrix alpha slope -> iso-surface edge hardness (higher = harder)
-const GOO_ALPHA_BIAS  = -6;      // feColorMatrix alpha offset -> where the threshold sits
+const MERGE_BUFFER_SCALE = 1.0; // calculate the field at the display's native 1024x600 resolution
 // Disc radius fed into the field = ring radius * FIELD_REACH constant. This is
-// FIXED -- an isolated orb is always the same size. Whether two orbs FUSE is
-// decided purely by how close the physics (attraction vs the repulsion shell,
-// see applyCrossPopulationForces) lets them get, not by inflating the discs.
+// randomized per orb so populations do not form identical circles. Whether two
+// orbs FUSE is decided by the summed field and their physics.
 const FIELD_REACH = 1.10;
 const ATTR_MAX = 4;              // attraction slider max; the per-population sliders use this directly
+const DISPLAY_SIZE_SCALE = 2.36; // twice the current display blob size
+const RADIUS_VARIATION_PX = 20;
+const FIELD_ISO = 0.20;
+const FIELD_EDGE = 0.10;
+const FIELD_RENDER_INTERVAL = 2; // update the expensive full-resolution field at 30Hz
 
 // 0 at/below MERGE_THRESHOLD (pure bounce), ramping to 1 at ATTR_MAX (full
 // merge). Drives the repulsion shell, the hard separation floor, and the
 // render's mergeAmount, so one number moves a population along bounce<->merge.
 function mergeTFor(pop) {
-  return constrain((attractionStrengthByPop[pop] - MERGE_THRESHOLD) / (ATTR_MAX - MERGE_THRESHOLD), 0, 1);
+  const attraction = effectiveInterAttractionFor(pop);
+  const normalized = constrain(
+    (attraction - MERGE_THRESHOLD) / (ATTR_MAX - MERGE_THRESHOLD),
+    0,
+    1
+  );
+  return Math.pow(normalized, MERGE_RESPONSE);
+}
+
+function effectiveInterAttractionFor(pop) {
+  return attractionStrengthByPop[pop] * INTER_ATTRACTION_SCALE_BY_POP[pop];
+}
+
+function effectiveBlobSize() {
+  return overallSize * DISPLAY_SIZE_SCALE;
 }
 
 // ---- live params (sliders now; updateParamsFromSensor() later) ----
-let overallSize = 52;
+let overallSize = 65; // v7: 25% larger blobs
 // per-population, indexed by pop. Attraction on an orb uses ITS OWN population's
 // value, so pop 1 chasing pop 2 need not equal pop 2 chasing pop 1.
-let attractionStrengthByPop = Array(POP_COUNT).fill(1.3);
+let attractionStrengthByPop = Array(POP_COUNT).fill(BASE_INTER_ATTRACTION);
 let speedByPop = Array(POP_COUNT).fill(1.0);
 
 let orbs = [];
+let individualsPerPop = [];
 let popColors = [];              // fixed p5.Color per population (rim)
 let popCenterColors = [];        // fixed p5.Color per population (gradient centre)
-let levelBuffer;                 // gradient-filled orb discs are drawn here
-let gooBuffer;                   // levelBuffer put through the goo filter, still at buffer res
+let levelBuffer;                 // metaball field buffer
+let fieldImageData;
+let fieldOrbs = [];
 let WHITE;
 
 let noiseAccumByPop = Array(POP_COUNT).fill(0);  // advanced by each pop's speed -> wander time
-
+let roamPhaseByPop = Array.from({ length: POP_COUNT }, (_, p) => p * Math.PI * 2 / POP_COUNT);
 let sliderRefs = {};
-let fpsSpan;
-
-const CONTROL_X = CANVAS_W + 40;
-const ROW_H = 44;
-const SECTION_GAP = 16;
+let fpsSpan = null;
 
 function setup() {
   const holder = document.getElementById('canvas-holder');
+  pixelDensity(1);
   const cnv = createCanvas(CANVAS_W, CANVAS_H);
   cnv.parent(holder);
+  cnv.style('display', 'block');
   WHITE = color(255);
   popColors = POP_COLORS.map(hex => color(hex));
   popCenterColors = popColors.map(base => lerpColor(base, WHITE, CENTER_LIGHTEN));
   const bw = Math.round(CANVAS_W * MERGE_BUFFER_SCALE);
   const bh = Math.round(CANVAS_H * MERGE_BUFFER_SCALE);
   levelBuffer = createGraphics(bw, bh);
-  gooBuffer = createGraphics(bw, bh);
-  injectGooFilter();
-
-  let y = 10;
-  y = addSlider(CONTROL_X, y, { label: 'overallSize', min: 16, max: 104, step: 1 }, overallSize,
-    (v) => { overallSize = v; }, 'overallSize');
-
-  y = addSectionHeader(CONTROL_X, y, 'Movement speed (per population)');
-  for (let p = 0; p < POP_COUNT; p++) {
-    const pp = p;
-    y = addSlider(CONTROL_X, y, { label: 'pop ' + (pp + 1) + ' speed', min: 0, max: 3, step: 0.05 },
-      speedByPop[pp], (v) => { speedByPop[pp] = v; }, 'speed' + pp);
-  }
-
-  y = addSectionHeader(CONTROL_X, y, 'Attraction strength (per population)');
-  for (let p = 0; p < POP_COUNT; p++) {
-    const pp = p;
-    y = addSlider(CONTROL_X, y, { label: 'pop ' + (pp + 1) + ' attraction', min: 0, max: ATTR_MAX, step: 0.05 },
-      attractionStrengthByPop[pp], (v) => { attractionStrengthByPop[pp] = v; }, 'attract' + pp);
-  }
-
-  y += SECTION_GAP;
-  const resetBtn = createButton('reset orbs');
-  resetBtn.parent('controls');
-  resetBtn.position(CONTROL_X, y);
-  resetBtn.mousePressed(initOrbs);
-  y += 34;
-
-  fpsSpan = createSpan('fps: --');
-  fpsSpan.parent('controls');
-  fpsSpan.position(CONTROL_X, y);
-  fpsSpan.style('color', '#888');
+  levelBuffer.pixelDensity(1);
+  fieldImageData = levelBuffer.drawingContext.createImageData(
+    levelBuffer.canvas.width,
+    levelBuffer.canvas.height
+  );
+  levelBuffer.drawingContext.imageSmoothingEnabled = true;
 
   initOrbs();
 
   console.log(
-    `[orbmerge] ${POP_COUNT} populations x ${INDIVIDUALS_PER_POP} = ${orbs.length} orbs, ` +
-    `single-pass radial-gradient discs. Metaball buffer ${levelBuffer.width}x${levelBuffer.height} ` +
-    `(${MERGE_BUFFER_SCALE}x of canvas).\n` +
-    `PERF: the render is 1 pass/frame -- an SVG goo-filter (Gaussian blur + alpha ` +
-    `step) applied at BUFFER res, then a plain upscale to the canvas. SVG filters ` +
-    `ARE GPU-accelerated in the Pi Chromium. Mitigations if needed, in order: lower ` +
-    `MERGE_BUFFER_SCALE to ~0.4, then reduce orb counts.`
+    `[orbmerge] ${POP_COUNT} populations x ${individualsPerPop.join('/')} = ${orbs.length} orbs, ` +
+    `shared scalar-field metaballs at ${levelBuffer.width}x${levelBuffer.height} ` +
+    `(${MERGE_BUFFER_SCALE}x of canvas, pixel density 1).`
   );
-}
-
-// One labelled slider row at (x, y). Mirrors the value into a span and (when
-// refKey is given) registers it so updateParamsFromSensor() can push external
-// values back into the UI later.
-function addSlider(x, y, def, initial, onChange, refKey) {
-  const lab = createSpan(def.label);
-  lab.parent('controls');
-  lab.position(x, y);
-
-  const valSpan = createSpan(String(initial));
-  valSpan.parent('controls');
-  valSpan.position(x + 196, y);
-  valSpan.style('color', '#9ad');
-
-  const slider = createSlider(def.min, def.max, initial, def.step);
-  slider.parent('controls');
-  slider.position(x, y + 17);
-  slider.style('width', '185px');
-  slider.input(() => {
-    onChange(slider.value());
-    valSpan.html(String(slider.value()));
-  });
-
-  if (refKey) sliderRefs[refKey] = { slider, valSpan, min: def.min, max: def.max };
-  return y + ROW_H;
-}
-
-// A bold section label at (x, y). Returns the y below it.
-function addSectionHeader(x, y, text) {
-  y += SECTION_GAP;
-  const h = createSpan(text);
-  h.parent('controls');
-  h.position(x, y);
-  h.style('font-weight', 'bold');
-  h.style('font-size', '13px');
-  return y + 24;
 }
 
 function initOrbs() {
   orbs = [];
+  individualsPerPop = Array.from(
+    { length: POP_COUNT },
+    () => floor(random(MIN_INDIVIDUALS_PER_POP, MAX_INDIVIDUALS_PER_POP + 1))
+  );
   const cx = width / 2, cy = height / 2;
   for (let p = 0; p < POP_COUNT; p++) {
     // Each population starts loosely gathered around its own point, so the
     // first cross-population contact is a genuine approach (a merge event)
     // rather than everything spawning in one pile.
     const a = (p / POP_COUNT) * TWO_PI - HALF_PI;
-    const gx = cx + Math.cos(a) * width * 0.28;
-    const gy = cy + Math.sin(a) * height * 0.28;
-    for (let i = 0; i < INDIVIDUALS_PER_POP; i++) {
+    const gx = cx + Math.cos(a) * width * 0.38;
+    const gy = cy + Math.sin(a) * height * 0.38;
+    for (let i = 0; i < individualsPerPop[p]; i++) {
       orbs.push(new Orb(
         constrain(gx + random(-70, 70), 60, width - 60),
         constrain(gy + random(-70, 70), 60, height - 60),
@@ -252,7 +214,9 @@ function initOrbs() {
 }
 
 // STUB -- later WebSocket / sensor rig. Only the sensor-controllable params are
-// reachable here (per-population attractionStrength + speed, overallSize); the autonomous wander constants are intentionally out of reach.
+// reachable here (inter-population attractionStrength + speed, overallSize);
+// intra-population attraction and autonomous wander constants are intentionally
+// out of reach.
 // speeds / attractionStrengths are arrays indexed by population; undefined or
 // missing entries are left untouched.
 function updateParamsFromSensor(data) {
@@ -274,10 +238,12 @@ function setParam(key, value, assign) {
 }
 
 function draw() {
+  window.harveyAmbientV1?.update();
   background(7, 7, 11);
 
   for (let p = 0; p < POP_COUNT; p++) {
     noiseAccumByPop[p] += NOISE_BASE * speedByPop[p];
+    roamPhaseByPop[p] += NOISE_BASE * speedByPop[p] * 0.35;
   }
 
   // --- AUTONOMOUS: each orb on its own seed, on its population's clock ---
@@ -288,92 +254,82 @@ function draw() {
 
   for (const o of orbs) o.update();
 
-  // hard separation floor -> weak-attraction pairs bounce instead of fusing
-  resolveCrossPopulationSeparation(orbs);
-
   // --- RENDER: every orb through the single-pass metaball pipeline ---
-  renderOrbLayers();
-
-  if (frameCount % 15 === 0) fpsSpan.html('fps: ' + nf(frameRate(), 1, 1));
-}
-
-// The SVG "goo" filter: Gaussian blur -> steep alpha step. Applied to a whole
-// ring-level buffer, it fuses overlapping discs into one hard-edged shape with
-// a neck, and thresholds a lone disc straight back to a crisp circle. Injected
-// once into the page; referenced from the canvas via drawingContext.filter.
-function injectGooFilter() {
-  const NS = 'http://www.w3.org/2000/svg';
-  const svg = document.createElementNS(NS, 'svg');
-  svg.setAttribute('width', '0');
-  svg.setAttribute('height', '0');
-  svg.style.position = 'absolute';
-  svg.style.pointerEvents = 'none';
-
-  const filter = document.createElementNS(NS, 'filter');
-  filter.setAttribute('id', 'orbmerge-goo');
-  // generous region so the blur is not clipped at the buffer edges
-  filter.setAttribute('x', '-30%');
-  filter.setAttribute('y', '-30%');
-  filter.setAttribute('width', '160%');
-  filter.setAttribute('height', '160%');
-  filter.setAttribute('color-interpolation-filters', 'sRGB'); // keep colours as authored
-
-  const blur = document.createElementNS(NS, 'feGaussianBlur');
-  blur.setAttribute('in', 'SourceGraphic');
-  blur.setAttribute('stdDeviation', String(GOO_BLUR));
-  blur.setAttribute('result', 'blur');
-
-  const cm = document.createElementNS(NS, 'feColorMatrix');
-  cm.setAttribute('in', 'blur');
-  cm.setAttribute('type', 'matrix');
-  // identity on RGB; alpha' = GOO_ALPHA_GAIN * alpha + GOO_ALPHA_BIAS  -> hard step
-  cm.setAttribute('values',
-    `1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 ${GOO_ALPHA_GAIN} ${GOO_ALPHA_BIAS}`);
-
-  filter.appendChild(blur);
-  filter.appendChild(cm);
-  svg.appendChild(filter);
-  document.body.appendChild(svg);
-}
-
-// One pass. Draw every orb as a single disc filled with a smooth radial
-// gradient (base colour at the rim, lightened toward white at the centre)
-// into the shared buffer, then blit the whole buffer through the goo filter
-// so the discs fuse (or a lone one thresholds back to a crisp circle with its
-// gradient intact -- the alpha step only hardens the SHAPE edge, colour
-// channels are untouched).
-function renderOrbLayers() {
-  const g = levelBuffer;
-  const gc = g.drawingContext;
-  const s = g.width / width;          // canvas px -> buffer px
-
-  // 1. gradient-filled discs into levelBuffer
-  g.clear();
-  for (const o of orbs) {
-    const rim = popColors[o.pop];
-    const center = popCenterColors[o.pop];
-    // fixed disc size; orbs the physics is actively merging get a small extra
-    // reach so the visible fusion tracks the force coupling.
-    const rr = OUTER_RATIO * overallSize * FIELD_REACH * (1 + 0.18 * o.mergeAmount);
-    const cx = o.pos.x * s, cy = o.pos.y * s, r = rr * s;
-
-    const grad = gc.createRadialGradient(cx, cy, 0, cx, cy, r);
-    grad.addColorStop(0, `rgb(${red(center)}, ${green(center)}, ${blue(center)})`);
-    grad.addColorStop(1, `rgb(${red(rim)}, ${green(rim)}, ${blue(rim)})`);
-    gc.fillStyle = grad;
-    gc.beginPath();
-    gc.arc(cx, cy, r, 0, TWO_PI);
-    gc.fill();
+  if (frameCount % FIELD_RENDER_INTERVAL === 0) {
+    renderOrbLayers();
+  } else {
+    image(levelBuffer, 0, 0, width, height);
   }
 
-  // 2. goo filter (blur + hard alpha step) -> gooBuffer, still at buffer res
-  gooBuffer.clear();
-  gooBuffer.drawingContext.filter = 'url(#orbmerge-goo)';
-  gooBuffer.image(g, 0, 0);
-  gooBuffer.drawingContext.filter = 'none';
+}
 
-  // 3. plain upscale onto the canvas (cheap; also softens the edge a touch)
-  image(gooBuffer, 0, 0, width, height);
+// Evaluate one shared metaball field. The contour is the isosurface of the
+// summed influences, so contact changes the silhouette instead of preserving
+// two independent circles.
+function renderOrbLayers() {
+  const w = levelBuffer.width;
+  const h = levelBuffer.height;
+  const scale = w / width;
+  const pixels = fieldImageData.data;
+  pixels.fill(0);
+
+  fieldOrbs = orbs.map((o) => {
+    const radius = o.visualRadius();
+    const rim = popColors[o.pop];
+    const radiusInField = radius * scale;
+    return {
+      x: o.pos.x * scale,
+      y: o.pos.y * scale,
+      radiusInField,
+      radiusSquared: radiusInField * radiusInField,
+      minX: Math.max(0, Math.floor((o.pos.x - radius) * scale)),
+      maxX: Math.min(w - 1, Math.ceil((o.pos.x + radius) * scale)),
+      minY: Math.max(0, Math.floor((o.pos.y - radius) * scale)),
+      maxY: Math.min(h - 1, Math.ceil((o.pos.y + radius) * scale)),
+      red: red(rim),
+      green: green(rim),
+      blue: blue(rim)
+    };
+  });
+
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let field = 0;
+      let redSum = 0, greenSum = 0, blueSum = 0;
+
+      for (const o of fieldOrbs) {
+        if (x < o.minX || x > o.maxX || y < o.minY || y > o.maxY) continue;
+        const dx = x + 0.5 - o.x;
+        const dy = y + 0.5 - o.y;
+        const normalizedDistanceSquared = (dx * dx + dy * dy) / o.radiusSquared;
+        if (normalizedDistanceSquared >= 1) continue;
+
+        const influence = (1 - normalizedDistanceSquared) ** 2;
+        field += influence;
+        redSum += o.red * influence;
+        greenSum += o.green * influence;
+        blueSum += o.blue * influence;
+      }
+
+      const index = (y * w + x) * 4;
+      const edgePosition = constrain(
+        (field - (FIELD_ISO - FIELD_EDGE)) / (FIELD_EDGE * 2),
+        0,
+        1
+      );
+      const alpha = edgePosition * edgePosition * (3 - 2 * edgePosition);
+      if (alpha <= 0) continue;
+      const inv = 1 / field;
+      const centerLight = constrain((field - FIELD_ISO) * 0.55, 0, CENTER_LIGHTEN);
+      pixels[index] = lerp(redSum * inv, 255, centerLight);
+      pixels[index + 1] = lerp(greenSum * inv, 255, centerLight);
+      pixels[index + 2] = lerp(blueSum * inv, 255, centerLight);
+      pixels[index + 3] = alpha * 255;
+    }
+  }
+
+  levelBuffer.drawingContext.putImageData(fieldImageData, 0, 0);
+  image(levelBuffer, 0, 0, width, height);
 }
 
 // HARD floor on different-population spacing -- the guarantee that a weak pair
@@ -386,7 +342,7 @@ function renderOrbLayers() {
 function resolveCrossPopulationSeparation(all) {
   const sepByPop = [];
   for (let p = 0; p < POP_COUNT; p++) {
-    sepByPop[p] = overallSize * BOUNCE_SEPARATION * (1 - mergeTFor(p));
+    sepByPop[p] = effectiveBlobSize() * BOUNCE_SEPARATION * (1 - mergeTFor(p));
   }
   for (let it = 0; it < SEPARATION_ITERS; it++) {
     for (let i = 0; i < all.length; i++) {
@@ -406,7 +362,7 @@ function resolveCrossPopulationSeparation(all) {
       }
     }
   }
-  const r = OUTER_RATIO * overallSize;
+  const r = Math.max(...all.map(o => o.visualRadius()));
   for (const o of all) {
     o.pos.x = constrain(o.pos.x, r, width - r);
     o.pos.y = constrain(o.pos.y, r, height - r);
@@ -420,8 +376,13 @@ class Orb {
     this.autoVel = createVector(0, 0);
     this.collisionForce = createVector(0, 0);
     this.mergeAmount = 0;
+    this.radiusOffset = random(-RADIUS_VARIATION_PX, RADIUS_VARIATION_PX);
     // per-individual seed so wander paths never fall into sync across a population.
     this.noiseSeed = random(1000);
+  }
+
+  visualRadius() {
+    return OUTER_RATIO * Math.max(20, effectiveBlobSize() + this.radiusOffset) * FIELD_REACH;
   }
 
   // AUTONOMOUS -- velocity is the DIFFERENCE of two Perlin channels per axis
@@ -448,60 +409,45 @@ class Orb {
 
     this.autoVel.set(vx, vy);
     if (this.autoVel.magSq() > 1e-6) this.autoVel.setMag(MOVE_BASE_PX * speedByPop[this.pop]);
+
+    const phase = roamPhaseByPop[this.pop];
+    const targetX = width * 0.5 + Math.cos(phase) * width * ROAM_RADIUS_X;
+    const targetY = height * 0.5 + Math.sin(phase * 0.83) * height * ROAM_RADIUS_Y;
+    this.autoVel.x += (targetX - this.pos.x) * ROAM_FORCE / width;
+    this.autoVel.y += (targetY - this.pos.y) * ROAM_FORCE / height;
   }
 
   // INTER-POPULATION -- attraction toward, and a repulsion shell around,
   // DIFFERENT-population orbs, plus this orb's merge proximity (0..1) for the
   // render. Same-population orbs are skipped entirely.
   //
-  // mergeT slides this population from BOUNCE to MERGE with its attraction
-  // slider: at 0 the shell is wide (REPEL_DIST_BOUNCE) and firm (REPULSION_
-  // BOUNCE) and sits outside metaball fusion range, so contact is a deflection;
-  // at 1 the shell is a small soft core, and attraction (which is also 0 when
-  // the slider is 0) drags orbs deep past fusion range into a fat neck.
+  // Only different-population boids interact, and only while their field
+  // radii overlap. Their shared field creates the metaball collision shape;
+  // attraction changes the local collision response, not free movement.
   applyCrossPopulationForces(all) {
     this.collisionForce.set(0, 0);
     this.mergeAmount = 0;
 
-    const attr = attractionStrengthByPop[this.pop];
+    const attr = effectiveInterAttractionFor(this.pop);
     const mergeT = mergeTFor(this.pop);
-
-    const attractReach = overallSize * INTERACTION_FACTOR;
-    const repelDist = overallSize * lerp(REPEL_DIST_BOUNCE, REPEL_DIST_MERGE, mergeT);
-    const repelGain = lerp(REPULSION_BOUNCE, REPULSION_MERGE, mergeT);
-    const R = Math.max(attractReach, repelDist);
-    const mergeFull = overallSize * MERGE_FULL_FACTOR;
+    const ownRadius = this.visualRadius();
 
     for (const other of all) {
       if (other === this || other.pop === this.pop) continue;
       const dx = other.pos.x - this.pos.x;
       const dy = other.pos.y - this.pos.y;
       const d = Math.hypot(dx, dy);
-      if (d >= R) continue;
+      const collisionReach = (ownRadius + other.visualRadius()) * COLLISION_REACH_FACTOR;
+      if (d >= collisionReach) continue;
 
       const ux = d > 1e-4 ? dx / d : 1;
       const uy = d > 1e-4 ? dy / d : 0;
+      const contact = constrain(1 - d / collisionReach, 0, 1);
+      const attract = attr * ATTRACT_BASE * contact;
+      this.collisionForce.x += ux * attract;
+      this.collisionForce.y += uy * attract;
 
-      // attraction: 0 at its edge, strongest at contact, and 0 whenever this
-      // population's slider is 0. Keyed to THIS orb's population, so it can be
-      // asymmetric; the repulsion shell below keeps an asymmetric pair honest.
-      if (d < attractReach) {
-        const attract = attr * ATTRACT_BASE * (1 - d / attractReach);
-        this.collisionForce.x += ux * attract;
-        this.collisionForce.y += uy * attract;
-      }
-
-      // repulsion shell: 0 at its onset, ramping to repelGain at full overlap.
-      if (d < repelDist) {
-        const repel = repelGain * (1 - d / repelDist);
-        this.collisionForce.x -= ux * repel;
-        this.collisionForce.y -= uy * repel;
-      }
-
-      // proximity 0..1, scaled by mergeT -- a weak-attraction pair contributes
-      // nothing (and can't get close anyway); falls straight back to 0 on
-      // separation, so the merge is fully reversible with no lingering.
-      const m = mergeT * constrain(map(d, R, mergeFull, 0, 1), 0, 1);
+      const m = mergeT * contact;
       if (m > this.mergeAmount) this.mergeAmount = m;
     }
   }
@@ -511,7 +457,7 @@ class Orb {
     this.pos.y += this.autoVel.y + this.collisionForce.y;
     // keep the whole outer ring on-canvas so the goo filter never clips a blob
     // at the edge (wander()'s edge steer usually keeps orbs off this clamp).
-    const r = OUTER_RATIO * overallSize;
+    const r = this.visualRadius();
     this.pos.x = constrain(this.pos.x, r, width - r);
     this.pos.y = constrain(this.pos.y, r, height - r);
   }
