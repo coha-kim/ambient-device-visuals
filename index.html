@@ -34,16 +34,25 @@
     #controls {
       display: none !important;
     }
+
+    /* Exhibition: no cursor, selection, gestures or context menu on the touch display. */
+    * {
+      cursor: none !important;
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+      touch-action: none;
+    }
   </style>
 </head>
 
-<body>
+<body oncontextmenu="return false">
   <div id="app">
     <div id="canvas-holder"></div>
     <div id="controls"></div>
   </div>
 
-  <script src="https://cdn.jsdelivr.net/npm/p5@2.3.1/lib/p5.min.js"></script>
+  <script src="vendor/p5-2.3.1.min.js"></script>
   <script src="sketch.js?v=palette-20"></script>
   <script type="module" src="ambient-link-v1.mjs"></script>
 </body>

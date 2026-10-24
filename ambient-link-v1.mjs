@@ -8,3 +8,11 @@ window.harveyAmbientV1 = { link, update() {
   const attractionStrengths = link.snapshot.states.map((_, population) => attractionFor(link.state(population).intensity));
   window.updateParamsFromSensor({ attractionStrengths });
 } };
+// Render health for the Pi dashboard and freeze watchdog: browser frame rate every 2 seconds.
+let frames = 0, since = performance.now();
+(function count() { frames++; requestAnimationFrame(count); })();
+setInterval(() => {
+  const now = performance.now(), fps = Math.round(frames * 10000 / (now - since)) / 10;
+  frames = 0; since = now;
+  if (link.connected) link.socket.send(JSON.stringify({ version: 1, type: 'stats', fps, width: innerWidth, height: innerHeight }));
+}, 2000);

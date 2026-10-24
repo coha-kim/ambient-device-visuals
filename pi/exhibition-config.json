@@ -1,0 +1,11 @@
+{
+  "room": "6dae1cb0c963f3245be1ef5f208ed754",
+  "host": "0.0.0.0",
+  "port": 8787,
+  "watchdog": {
+    "graceSeconds": 60,
+    "staleSeconds": 30,
+    "minFps": 5,
+    "minRestartIntervalSeconds": 120
+  }
+}

@@ -1,0 +1,3 @@
+# Exhibition desktop. labwc -m also runs /etc/xdg/labwc/autostart, where root-setup.sh removes the panel and
+# desktop icons (restore with: sudo cp /etc/xdg/labwc/autostart.harvey-backup /etc/xdg/labwc/autostart).
+# Nothing extra is needed here; the kiosk itself is a systemd user service.

@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Harvey Monitor</title>
+<style>
+  :root { --bg: #f4f3ee; --card: #fff; --ink: #1f2420; --muted: #6b716c; --line: #e2e0d8;
+    --ok: #1f8a4c; --warn: #b7791f; --bad: #c53030; --accent: #009ae2; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #1b1d1b; --card: #252825; --ink: #ecede9; --muted: #9aa09b;
+    --line: #353935; --ok: #4cc77d; --warn: #e2b04a; --bad: #f06b6b; --accent: #3fb6ef; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 16px; background: var(--bg); color: var(--ink); font: 15px/1.45 system-ui, -apple-system, sans-serif; }
+  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; margin: 0 auto 16px; max-width: 1100px; }
+  h1 { font-size: 20px; margin: 0; }
+  #overall { font-weight: 600; }
+  #updated { color: var(--muted); font-size: 13px; margin-left: auto; }
+  main { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); max-width: 1100px; margin: 0 auto; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+  section.wide { grid-column: 1 / -1; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 10px; display: flex; align-items: center; gap: 8px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); display: inline-block; flex: none; }
+  .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); }
+  .dot.ok { background: var(--ok); } .dot.warn { background: var(--warn); } .dot.bad { background: var(--bad); }
+  dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; margin: 0; }
+  dt { color: var(--muted); } dd { margin: 0; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+  .big { font-size: 28px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 5px 6px; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 500; font-size: 13px; }
+  .scroll { overflow-x: auto; }
+  #events { max-height: 260px; overflow-y: auto; font-size: 13px; }
+  #events div { padding: 3px 0; border-bottom: 1px solid var(--line); }
+  #events time { color: var(--muted); margin-right: 8px; font-variant-numeric: tabular-nums; }
+  button { font: inherit; padding: 8px 14px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); cursor: pointer; margin-top: 10px; }
+  button:hover { border-color: var(--accent); }
+  .muted { color: var(--muted); }
+  #offline { display: none; background: var(--bad); color: #fff; padding: 10px 14px; border-radius: 10px; max-width: 1100px; margin: 0 auto 12px; }
+</style>
+</head>
+<body>
+<header><h1>Harvey Monitor</h1><span id="overall">Loading…</span><span id="updated"></span></header>
+<div id="offline">Can’t reach the Pi. Check that this device is on the Pi’s network.</div>
+<main>
+  <section><h2><span class="dot" id="d-visuals"></span>Visuals</h2>
+    <div class="big" id="fps">–</div>
+    <dl id="visuals"></dl>
+    <button id="restart">Restart visuals</button>
+  </section>
+  <section><h2><span class="dot" id="d-pi"></span>Raspberry Pi</h2>
+    <div class="big" id="temp">–</div>
+    <dl id="pi"></dl>
+  </section>
+  <section><h2><span class="dot" id="d-net"></span>Network</h2><dl id="net"></dl></section>
+  <section class="wide"><h2><span class="dot" id="d-ws"></span>WebSocket</h2>
+    <div class="scroll"><table><thead><tr><th>Device</th><th>Population</th><th>Address</th><th>Connected</th><th>Last message</th></tr></thead><tbody id="clients"></tbody></table></div>
+    <h2 style="margin-top:16px">Populations</h2>
+    <div class="scroll"><table><thead><tr><th>Population</th><th>Phase</th><th>Intensity</th><th>Held now</th><th>Recovery left</th></tr></thead><tbody id="pops"></tbody></table></div>
+  </section>
+  <section class="wide"><h2>Events</h2><div id="events"></div></section>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '–').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+const dur = s => s == null ? '–' : s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${Math.floor(s / 3600)}h ${Math.floor(s % 3600 / 60)}m`;
+const rows = pairs => pairs.map(([k, v, cls]) => `<dt>${esc(k)}</dt><dd class="${cls || ''}">${v}</dd>`).join('');
+const level = (bad, warn) => bad ? 'bad' : warn ? 'warn' : 'ok';
+const popNames = ['0 · green', '1 · teal', '2 · blue'];
+
+function render(s) {
+  const g = s.graphics, p = s.pi, n = s.network;
+  const visualsLevel = level(!g.ambientConnected || g.kiosk?.state !== 'active' || (g.lastReportSeconds ?? 99) > 10, g.fps !== null && g.fps < 25);
+  $('d-visuals').className = 'dot ' + visualsLevel;
+  $('fps').textContent = g.fps === null ? 'No frames' : `${g.fps} fps`;
+  $('visuals').innerHTML = rows([
+    ['Display page', g.ambientConnected ? 'Connected' : 'Not connected', g.ambientConnected ? 'ok' : 'bad'],
+    ['Last frame report', g.lastReportSeconds === null ? '–' : `${g.lastReportSeconds}s ago`],
+    ['Viewport', esc(g.viewport)],
+    ['Kiosk service', esc(g.kiosk?.state), g.kiosk?.state === 'active' ? 'ok' : 'bad'],
+    ['Kiosk running for', dur(g.kiosk?.activeSeconds)],
+    ['Automatic restarts', esc(g.kiosk?.restarts), g.kiosk?.restarts ? 'warn' : ''],
+  ]);
+
+  const tempLevel = level(p.tempC >= 80, p.tempC >= 70);
+  const piLevel = level(p.throttledFlags.some(f => f.endsWith('now')) || tempLevel === 'bad', tempLevel === 'warn' || p.throttledFlags.length);
+  $('d-pi').className = 'dot ' + piLevel;
+  $('temp').innerHTML = `<span class="${tempLevel}">${p.tempC ?? '–'} °C</span>`;
+  $('pi').innerHTML = rows([
+    ['Power warnings', p.throttledFlags.length ? esc(p.throttledFlags.join(', ')) : 'None', p.throttledFlags.length ? (p.throttledFlags.some(f => f.endsWith('now')) ? 'bad' : 'warn') : 'ok'],
+    ['Supply', p.supplyVolts ? `${p.supplyVolts.toFixed(2)} V` : '–', p.supplyVolts && p.supplyVolts < 4.85 ? 'warn' : ''],
+    ['Fan', p.fanRpm === null ? '–' : `${p.fanRpm} rpm`],
+    ['Load (1/5/15 min)', `${p.load.join(' / ')} of ${p.cpus}`],
+    ['Memory used', `${p.memoryUsedPercent}%`, p.memoryUsedPercent > 85 ? 'warn' : ''],
+    ['Pi up for', dur(p.uptimeSeconds)],
+    ['Relay up for', dur(s.relayUptimeSeconds)],
+  ]);
+
+  const hotspot = n.wifi?.mode === 'hotspot';
+  $('d-net').className = 'dot ' + level(!n.wifi, !hotspot);
+  $('net').innerHTML = rows([
+    ['Wi-Fi', n.wifi ? `${esc(n.wifi.connection)} (${hotspot ? 'hotspot' : 'joined network'})` : 'Off', n.wifi ? (hotspot ? 'ok' : 'warn') : 'bad'],
+    ...(hotspot ? [['Devices on hotspot', n.hotspotClients.length ? n.hotspotClients.map(c => esc(c.address)).join(', ') : 'None']]
+      : n.wifi ? [['Signal', n.wifi.signal == null ? '–' : `${n.wifi.signal}% · ch ${n.wifi.channel}`]] : []),
+    ['Addresses', n.addresses.map(a => `${esc(a.address)} <span class="muted">${esc(a.interface)}</span>`).join('<br>') || '–'],
+  ]);
+
+  const portables = s.clients.filter(c => c.role === 'portable' && c.exhibitionRoom);
+  $('d-ws').className = 'dot ' + level(!g.ambientConnected, !portables.length);
+  $('clients').innerHTML = s.clients.length ? s.clients.map(c => `<tr><td>${c.role === 'ambient' ? 'Ambient display' : 'Portable'}${c.exhibitionRoom ? '' : ' <span class="warn">(other room)</span>'}</td>
+    <td>${c.role === 'portable' ? esc(popNames[c.population]) : '–'}</td><td>${esc(c.ip)}</td><td>${dur(c.connectedSeconds)}</td>
+    <td class="${c.lastMessageSeconds > 10 && c.role === 'portable' ? 'warn' : ''}">${c.lastMessageSeconds}s ago</td></tr>`).join('')
+    : '<tr><td colspan="5" class="muted">No devices connected</td></tr>';
+  $('pops').innerHTML = s.populations.length ? s.populations.map(q => `<tr><td>${esc(popNames[q.population])}</td><td>${esc(q.phase)}</td>
+    <td>${q.intensity.toFixed(2)}</td><td>${q.holder ? 'Yes' : '–'}</td><td>${q.recoveryRemainingSeconds ? q.recoveryRemainingSeconds + 's' : '–'}</td></tr>`).join('')
+    : '<tr><td colspan="5" class="muted">No interaction yet since the relay started</td></tr>';
+
+  $('events').innerHTML = s.events.slice().reverse().map(e => `<div class="${e.level === 'warn' ? 'warn' : ''}"><time>${new Date(e.at).toLocaleTimeString()}</time>${esc(e.message)}</div>`).join('') || '<div class="muted">No events yet</div>';
+
+  const worst = [visualsLevel, piLevel].includes('bad') ? 'bad' : [visualsLevel, piLevel].includes('warn') ? 'warn' : 'ok';
+  $('overall').className = worst;
+  $('overall').textContent = { ok: 'All good', warn: 'Needs a look', bad: 'Problem' }[worst];
+  $('updated').textContent = `Updated ${new Date(s.at).toLocaleTimeString()}`;
+}
+
+async function poll() {
+  try { const r = await fetch('/api/status', { cache: 'no-store' }); render(await r.json()); $('offline').style.display = 'none'; }
+  catch { $('offline').style.display = 'block'; }
+  setTimeout(poll, 2000);
+}
+$('restart').onclick = async () => {
+  if (!confirm('Restart the visuals on the display? The screen goes blank for a few seconds.')) return;
+  $('restart').disabled = true; await fetch('/api/restart-visuals', { method: 'POST' }).catch(() => {}); setTimeout(() => $('restart').disabled = false, 5000);
+};
+poll();
+</script>
+</body>
+</html>

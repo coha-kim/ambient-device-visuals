@@ -12,7 +12,7 @@ From this project directory:
 python3 -m http.server 8000
 ```
 
-Open http://localhost:8000. Internet access is needed to load the pinned p5.js 2.3.1 CDN dependency. Chromium is recommended for the source sketch's SVG canvas filter.
+Open http://localhost:8000. p5.js 2.3.1 is bundled in `vendor/`, so no internet is needed. Chromium is recommended for the source sketch's SVG canvas filter.
 
 The canvas and metaball field are calculated at the display's native 1024 × 600 resolution, with pixel density fixed to 1. Blob size is doubled for fuller display coverage while each blob retains its randomized ±20 px radius variation. The expensive full-resolution field updates at 30 Hz while the display continues presenting it at the browser frame rate. This avoids field-grid upscaling and stair-stepped contours. Existing local edits hide the controls. There is no colour picker.
 
@@ -30,6 +30,10 @@ Recovery v5: after any positive hold, recovery lasts at least 30 seconds and at 
 
 Historical palette v6 used the first three swatches from the supplied reference, left to right: #009A8A, #3CBDAF, #77EDD7. This supersedes the temporary yellow. The portable matches the second colour.
 
-Saturation and size v19: the second, light-green population is now `#B0E57B`. All blob radii are scaled by 1.15, including per-orb variation and the master bonus. The other population colours, gradients, movement, and attraction parameters are preserved. Pre-change files are in `versions/pre-saturation-size-v19/`. This local revision has not been transferred to the Pi.
+Saturation and size v19: the second, light-green population is now `#B0E57B`. All blob radii are scaled by 1.15, including per-orb variation and the master bonus. The other population colours, gradients, movement, and attraction parameters are preserved. Pre-change files are in `versions/pre-saturation-size-v19/`.
 
-Palette v20: population indices 0, 1, and 2 use `#8DD644`, `#00E2B7`, and `#009AE2` respectively. The v19 15% size increase and existing gradients, movement, and attraction settings are preserved. Pre-change files are in `versions/pre-palette-v20/`. This local revision has not been transferred to the Pi.
+Palette v20: population indices 0, 1, and 2 use `#8DD644`, `#00E2B7`, and `#009AE2` respectively. The v19 15% size increase and existing gradients, movement, and attraction settings are preserved. Pre-change files are in `versions/pre-palette-v20/`. This revision runs on the Pi.
+
+## Raspberry Pi exhibition
+
+The Pi runs the relay, the full-screen visuals and a monitoring dashboard as boot services, with crash and freeze recovery, a hardware watchdog and a ready-to-switch Wi-Fi hotspot for the portables. Setup, addresses, commands and the portable (ESP32) protocol are in [pi/README-pi.md](pi/README-pi.md). Deploy changes from the Mac with `pi/deploy.sh`.

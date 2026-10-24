@@ -1,0 +1,12 @@
+[Unit]
+Description=Harvey exhibition relay and monitoring dashboard
+After=network.target
+
+[Service]
+WorkingDirectory=%h/harvey/ambient-device-visuals
+ExecStart=/usr/bin/node pi/exhibition-server.mjs
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target
