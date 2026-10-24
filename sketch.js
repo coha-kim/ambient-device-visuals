@@ -47,7 +47,7 @@ const CANVAS_H = 600;
 const POP_COUNT = 3;
 const MIN_INDIVIDUALS_PER_POP = 2;
 const MAX_INDIVIDUALS_PER_POP = 4;
-const POP_COLORS = Object.freeze(['#33C4A0', '#C6E2B6', '#DCEBD3']);
+const POP_COLORS = Object.freeze(['#8DD644', '#00E2B7', '#009AE2']);
 
 // ---- orb shape ----
 // Each orb is one disc at this radius (as a fraction of overallSize), filled
@@ -116,7 +116,8 @@ const MERGE_BUFFER_SCALE = 1.0; // calculate the field at the display's native 1
 // orbs FUSE is decided by the summed field and their physics.
 const FIELD_REACH = 1.10;
 const ATTR_MAX = 4;              // attraction slider max; the per-population sliders use this directly
-const DISPLAY_SIZE_SCALE = 1.40; // modest increase from the half-size tuning
+const DISPLAY_SIZE_SCALE = 1.40; // existing base-size tuning
+const BLOB_SIZE_MULTIPLIER = 1.15; // v19: scale every full blob radius by 15%
 const RADIUS_VARIATION_PX = 20;
 const MASTER_RADIUS_BONUS_MIN = 5;
 const MASTER_RADIUS_BONUS_MAX = 10;
@@ -142,7 +143,7 @@ function effectiveInterAttractionFor(pop) {
 }
 
 function effectiveBlobSize() {
-  return overallSize * DISPLAY_SIZE_SCALE;
+  return overallSize * DISPLAY_SIZE_SCALE * BLOB_SIZE_MULTIPLIER;
 }
 
 // ---- live params (sliders now; updateParamsFromSensor() later) ----
@@ -466,7 +467,9 @@ class Orb {
   }
 
   visualRadius() {
-    return OUTER_RATIO * Math.max(20, effectiveBlobSize() + this.radiusOffset) * FIELD_REACH;
+    // Scale the radius variation and minimum with the base size.
+    return OUTER_RATIO * Math.max(20 * BLOB_SIZE_MULTIPLIER,
+      effectiveBlobSize() + this.radiusOffset * BLOB_SIZE_MULTIPLIER) * FIELD_REACH;
   }
 
   // AUTONOMOUS -- velocity is the DIFFERENCE of two Perlin channels per axis
